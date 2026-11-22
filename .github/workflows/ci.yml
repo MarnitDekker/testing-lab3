@@ -1,0 +1,152 @@
+name: Shop CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      demo:
+        description: Failure to demonstrate on a separate branch
+        default: none
+        type: choice
+        options: [none, unit, coverage, security, e2e]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m ruff check shop tests tools
+      - name: Unit tests and coverage gate
+        env:
+          DEMO: ${{ inputs.demo }}
+        shell: bash
+        run: |
+          if [[ "$DEMO" == unit ]]; then
+            python -m pytest tests/fixtures/demo_unit_failure.py --junitxml=artifacts/unit.xml
+          elif [[ "$DEMO" == coverage ]]; then
+            python -m pytest tests/test_unit.py -k test_total --cov=shop.domain --cov-report=term-missing --cov-report=xml:artifacts/coverage.xml --cov-fail-under=80 --junitxml=artifacts/unit.xml
+          else
+            python -m pytest tests/test_unit.py --cov=shop.domain --cov-report=term-missing --cov-report=xml:artifacts/coverage.xml --cov-fail-under=80 --junitxml=artifacts/unit.xml
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-and-coverage
+          path: artifacts/
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Block HIGH Bandit findings
+        env:
+          DEMO: ${{ inputs.demo }}
+        shell: bash
+        run: |
+          if [[ "$DEMO" == security ]]; then
+            python tools/security_gate.py --fixture tests/fixtures/bandit-high.json
+          else
+            python tools/security_gate.py
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit
+          path: artifacts/bandit.json
+
+  build:
+    needs: [unit, security]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - run: npm run build --prefix frontend
+      - uses: actions/upload-artifact@v4
+        with:
+          name: storefront-build
+          path: frontend/dist/
+
+  integration:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest tests/test_unit.py tests/test_integration.py --cov=shop --cov-report=term-missing --cov-report=xml:artifacts/coverage-backend.xml --cov-fail-under=80 --junitxml=artifacts/integration.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration
+          path: artifacts/
+
+  e2e:
+    needs: integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - uses: actions/download-artifact@v4
+        with:
+          name: storefront-build
+          path: frontend/dist/
+      - run: python -m pip install -r requirements.txt
+      - run: python -m playwright install --with-deps chromium
+      - name: Browser tests
+        env:
+          DEMO: ${{ inputs.demo }}
+        run: python -m pytest tests/e2e --junitxml=artifacts/e2e.xml --html=artifacts/e2e.html --self-contained-html --tracing=retain-on-failure --screenshot=only-on-failure --output=artifacts/playwright
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright
+          path: artifacts/
+
+  required-quality:
+    if: ${{ always() }}
+    needs: [unit, security, build, integration, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every stage to succeed
+        run: test "${{ needs.unit.result }} ${{ needs.security.result }} ${{ needs.build.result }} ${{ needs.integration.result }} ${{ needs.e2e.result }}" = "success success success success success"
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: required-quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: storefront-build
+          path: release/frontend/dist
+      - run: cp -r shop requirements.txt release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.sha }}
+          path: release/
