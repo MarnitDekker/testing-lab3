@@ -8,7 +8,7 @@
 
 Кафедра программного обеспечения вычислительной техники и автоматизированных систем
 
-# Лабораторная работа № 4
+# Лабораторная работа № 3
 
 **Тема** - Автоматизация UI-тестов и построение CI/CD-пайплайна с блокирующими quality gates
 
@@ -35,33 +35,94 @@
 
 ## 1. UI-автоматизация
 
-Использован React-интерфейс edgistify-Assignment. Добавлены поиск и локальный Flask API с тестовым каталогом. Сценарии выполняются в Chromium через Playwright и взаимодействуют с API по HTTP.
+За основу взят React-интерфейс магазина [edgistify-Assignment](https://github.com/Sajid788/edgistify-Assignment). В каталог добавлено поле поиска. Вместо удалённого API интерфейс обращается к локальному Flask API. Сервер выдаёт два тестовых товара, Classic Tee и Canvas Cap, и хранит аккаунты, корзины и заказы в памяти процесса.
 
-Класс `ShopPages` в `tests/e2e/pages.py` хранит локаторы и действия. В `tests/e2e/test_shop.py` описаны проверки результатов. Каждый сценарий получает отдельный браузерный контекст, а сценарии с авторизацией используют отдельные учётные записи.
+[Репозиторий лабораторной работы](https://github.com/MarnitDekker/testing-lab3)
 
-| Сценарий | Ожидаемый результат |
+Фикстура `base_url` в `tests/e2e/conftest.py` запускает Flask на свободном локальном порту. Сервер отдаёт сборку React и принимает HTTP-запросы браузера. После прогона сервер останавливается. Playwright открывает отдельный браузерный контекст для каждого теста. Для входа, корзины, заказа и выхода фикстура заранее регистрирует через API пользователя с уникальным email. В тесте регистрации аккаунт создаётся через форму.
+
+Методы класса `ShopPages` в `tests/e2e/pages.py` выполняют действия с формами и кнопками. Проверки результатов находятся в `tests/e2e/test_shop.py`.
+
+### Фрагменты Page Object и теста оформления заказа
+
+```python
+from playwright.sync_api import expect
+
+
+class ShopPages:
+    def __init__(self, page):
+        self.page = page
+
+    def register(self, email, password):
+        self.page.goto("/signup")
+        self.page.get_by_placeholder("Name").fill("Lab User")
+        self.page.get_by_placeholder("Email").fill(email)
+        self.page.get_by_placeholder("Password").fill(password)
+        self.page.get_by_role("button", name="Sign Up").click()
+        expect(self.page).to_have_url("/login")
+
+    def login(self, email, password):
+        self.page.goto("/login")
+        self.page.locator('input[type="email"]').fill(email)
+        self.page.locator('input[type="password"]').fill(password)
+        self.page.get_by_role("button", name="Login", exact=True).click()
+        expect(self.page).to_have_url("/")
+
+    def search(self, query):
+        self.page.goto("/products")
+        self.page.get_by_role("searchbox", name="Search products").fill(query)
+
+    def add_tee(self):
+        self.search("tee")
+        expect(self.page.get_by_role("heading", name="Canvas Cap")).to_have_count(0)
+        self.page.get_by_role("button", name="Add Cart").click()
+        expect(self.page.get_by_text("Item added to cart")).to_be_visible()
+        nav = self.page.get_by_role("navigation")
+        nav.get_by_role("link", name="Cart", exact=True).click()
+        expect(self.page.get_by_role("heading", name="Your Cart")).to_be_visible()
+
+    def order(self, email):
+        self.page.get_by_role("button", name="Proceed to Checkout").click()
+        for field, value in {
+            "firstName": "Lab", "lastName": "User", "email": email,
+            "address": "10 Test Street", "city": "Belgorod", "pinCode": "308000",
+        }.items():
+            self.page.locator(f'input[name="{field}"]').fill(value)
+        expect(self.page.get_by_text("$20", exact=True)).to_be_visible()
+        self.page.get_by_role("button", name="Place Order", exact=True).click()
+```
+
+В тесте после отправки формы проверяются заголовок подтверждения и название заказанного товара.
+
+```python
+def test_checkout(pages, page, account):
+    pages.login(account, PASSWORD)
+    pages.add_tee()
+    pages.order(account)
+    expect(page.get_by_role("heading", name="Order Placed Successfully!")).to_be_visible()
+    expect(page.get_by_text("Classic Tee", exact=True)).to_be_visible()
+```
+
+| Сценарий | Действия и проверка |
 |---|---|
 | Регистрация | Открывается форма входа, созданная учётная запись позволяет войти |
-| Вход | Открывается каталог, доступна кнопка Logout |
+| Вход | Вводятся email и пароль, проверяются переход на главную и наличие кнопки Logout |
 | Поиск | Запрос tee оставляет Classic Tee и скрывает Canvas Cap |
 | Добавление в корзину | Classic Tee отображается в корзине |
-| Оформление заказа | Показано подтверждение с заказанным товаром |
+| Оформление заказа | Добавляется Classic Tee, заполняется адрес, проверяется сумма $20 и подтверждение с товаром |
 | Выход | После выхода переход в корзину перенаправляет на вход |
 
-Штатный прогон Playwright: 6 сценариев пройдены. В демонстрационном прогоне проверка поиска намеренно ожидает отсутствующий заголовок и завершается ошибкой.
+В штатном прогоне пройдены все 6 сценариев Playwright.
 
 ![Успешный локальный прогон Playwright](img/e2e-passed.png)
+
+В демонстрационном прогоне выбран только `test_search`. При `DEMO=e2e` тест ожидает заголовок `Intentional failure`, которого нет на странице. На скриншоте видны статус `FAILED`, строка проверки и сообщение `element(s) not found`. Снимок подтверждает, что Playwright фиксирует невыполненное ожидание и показывает причину ошибки.
 
 ![Локальная демонстрация падения Playwright](img/e2e-failed.png)
 
 ## 2. Пирамида тестирования
 
-```text
-              / E2E: 6  \
-             / API: 8    \
-            / Unit: 12    \
-           ----------------
-```
+В основании пирамиды находятся 12 unit-тестов, на среднем уровне - 8 интеграционных проверок API, на вершине - 6 браузерных E2E-тестов.
 
 | Уровень | Количество | Назначение |
 |---|---:|---|
@@ -69,36 +130,71 @@
 | Integration | 8 | Проверка HTTP-контрактов регистрации и входа, каталога, корзины и заказа |
 | E2E | 6 | По одному браузерному сценарию на каждую ключевую операцию |
 
-Варианты входных данных проверяются на уровне unit, правила авторизации и изоляция корзин - через API. В браузере оставлено по одному сценарию на каждую обязательную операцию.
+В `test_unit.py` три параметризованные проверки по четыре случая. Поиск проверяется с пустым запросом, пробелами, другим регистром и отсутствующим товаром. Валидация проверяется на корректных данных, пустом имени, неверном email и коротком пароле. Расчёт суммы проверяется на пустой корзине, одной позиции, большем количестве и нескольких позициях.
+
+В `test_integration.py` тестовый клиент Flask проверяет регистрацию и повторный email, каталог, добавление и удаление позиции, оформление заказа и очистку корзины, нормализацию email при входе, отказ при неверном размере, изоляцию корзин и отказ в доступе к заказам без действующего токена.
+
+Разные комбинации входных данных проверяются быстрыми unit-тестами. Правила, зависящие от HTTP и состояния аккаунта, проверяются через API. В браузере оставлено по одному тесту на каждую обязательную пользовательскую операцию.
 
 ## 3. CI/CD и quality gates
 
-GitHub Actions запускает workflow на каждый `push` и `pull_request`. Сначала выполняются Ruff, unit-тесты, контроль покрытия и Bandit. Затем собирается React-приложение, запускаются интеграционные и браузерные тесты. Job `required-quality` требует успешного завершения всех пяти стадий. Релизный архив публикуется только после успешного push в `main`.
+Workflow из `.github/workflows/ci.yml` запускается на каждый `push` и `pull_request`. Сначала выполняются Ruff, unit-тесты, контроль покрытия и Bandit. Затем собирается React-приложение, запускаются интеграционные и браузерные тесты. Job `required-quality` требует успешного завершения всех пяти стадий. Релизный архив публикуется только после успешного push в `main`.
 
 | Проверка | Блокирующее условие | Что останавливается |
 |---|---|---|
 | Unit и lint | Тест или Ruff завершился с ошибкой | Сборка и последующие стадии |
 | Coverage | Покрытие ниже 80 % | Сборка при проверке бизнес-логики, E2E и релиз при проверке всего API после сборки |
 | Bandit | Обнаружено замечание HIGH или сканирование завершилось ошибкой | Сборка и последующие стадии |
-| Integration и E2E | Хотя бы один тест упал | Все следующие стадии |
+| Integration | Хотя бы один тест упал | E2E и релиз |
+| E2E | Хотя бы один тест упал | Релиз |
 
-Артефакты workflow содержат XML покрытия, JUnit XML для pytest, HTML-отчёт браузерных проверок, трассировки и скриншоты при падении, JSON Bandit. Шаблон badge размещён в `README.md`.
+### Зависимости заданий и артефакты
 
-### 3.1. Локальная проверка
+| Задание | От каких заданий зависит | Что делает и публикует |
+|---|---|---|
+| `unit` | Запускается сразу | Ruff, 12 unit-тестов и порог 80 % для `shop/domain.py`. Артефакт `unit-and-coverage` содержит `unit.xml` и `coverage.xml` |
+| `security` | Запускается параллельно с `unit` | Bandit сканирует `shop/`. Артефакт `bandit` содержит `bandit.json` |
+| `build` | `unit` и `security` | Собирает React через TypeScript и Vite и публикует `storefront-build` |
+| `integration` | `build` | Запускает unit- и интеграционные тесты вместе. Проверяет порог 80 % для Python backend, публикует JUnit и XML покрытия в артефакте `integration` |
+| `e2e` | `integration` | Загружает собранный фронтенд и запускает Chromium. Артефакт `playwright` содержит HTML и JUnit, а при падении также скриншот и трассировку |
+| `required-quality` | Все пять предыдущих заданий | Проверяет, что результат каждого задания равен `success`. Выполняется и при пропуске зависимых стадий |
+| `release` | `required-quality` | После успешного push в `main` публикует архив со сборкой React, Flask API и списком зависимостей |
 
-| Прогон | Результат |
-|---|---|
-| Штатные unit и integration | 20 тестов пройдены. Покрытие бизнес-логики 100 %, backend 93,68 % |
-| Штатный Bandit | 0 находок HIGH |
-| Намеренное падение unit | 1 тест упал, код завершения 1 |
-| Сниженное покрытие | 66,67 % при пороге 80 %, код завершения 1 |
-| Синтетический отчёт Bandit | 1 находка HIGH, код завершения 1 |
+Отчёты тестов и Bandit загружаются через `if: always()`, поэтому уже сформированные файлы доступны при падении проверки.
 
-### 3.2. Подтверждение в GitHub Actions
+### Результаты проверок
 
-Для запуска демонстраций предусмотрен параметр `demo`. Значение `unit` запускает намеренно падающий тест, `coverage` запускает только расчёт суммы, `security` подаёт синтетический отчёт с находкой HIGH через тот же фильтр, который применяется к отчёту Bandit. Значение `e2e` демонстрирует падение браузерной проверки. Обычные push и pull request запускают штатные проверки.
+Штатный прогон: 12 unit- и 8 интеграционных тестов пройдены. Покрытие бизнес-логики составило 100 %, backend - 93,68 %. Bandit не обнаружил находок HIGH.
 
-После публикации требуется включить защиту `main` и назначить обязательным статус `required-quality`. Скриншоты облачных прогонов и действующий badge появятся после публикации в GitHub.
+На ветке `main` все стадии завершились успешно, включая `release`.
+
+![Успешный прогон Shop CI на main](img/ci-main.png)
+
+В ручном прогоне `demo = unit` на ветке `ci-demo` выполняется тест из `tests/fixtures/demo_unit_failure.py` с намеренно ложным утверждением. `unit` получает код 1. Задания `build`, `integration` и `e2e` пропущены. Итоговая проверка `required-quality` завершилась ошибкой, стадия `release` пропущена.
+
+![Падение unit-теста и пропуск сборки](img/ci-unit-skipped.png)
+
+В успешном прогоне опубликованы отчёты тестов и покрытия, результаты Bandit, сборка и релизный архив.
+
+![Артефакты успешного прогона GitHub Actions](img/ci-artifacts.png)
+
+В прогоне `demo = coverage` отбираются четыре случая расчёта суммы (`test_total`). Они проходят, но выполняют 6 из 9 исполняемых строк `shop/domain.py`. Покрытие составляет 66,67 % при пороге 80 %. Задание `unit` завершилось с кодом 1, сборка пропущена.
+
+![Блокировка сборки при покрытии ниже 80 %](img/ci-coverage.png)
+
+В штатном режиме `tools/security_gate.py` читает JSON-отчёт Bandit и возвращает код 1 при наличии записи с `issue_severity = HIGH`. В прогоне `demo = security` тот же фильтр получил синтетический отчёт `tests/fixtures/bandit-high.json` с одной находкой HIGH. Задание `security` завершилось с кодом 1, сборка пропущена.
+
+![Блокировка сборки при демонстрационной находке HIGH](img/ci-security.png)
+
+Badge в `README.md` показывает успешный прогон `Shop CI`.
+
+![Badge Shop CI в README](img/ci-badge.png)
+
+Для ветки `main` в правиле защиты указаны обязательный pull request и успешное прохождение проверки `required-quality` от GitHub Actions.
+
+![Правило защиты ветки main](img/ci-branch-main.png)
+
+![Обязательная проверка required-quality](img/ci-required-check.png)
 
 ## 4. Контрольные вопросы
 
@@ -110,70 +206,3 @@ GitHub Actions запускает workflow на каждый `push` и `pull_req
 ## Заключение
 
 Автоматические проверки выявляют ошибки до слияния изменений. Зависимости заданий в CI останавливают сборку и выпуск при нарушении порогов или падении тестов.
-
-## Команды для запуска и скриншотов
-
-В PowerShell из папки проекта:
-
-```powershell
-Set-Location -LiteralPath 'D:\Четвертый курс\Тестирование\TestingPS\lab3'
-python -m venv .venv
-$py = '.\.venv\Scripts\python.exe'
-& $py -m pip install -r requirements.txt
-npm.cmd --prefix frontend ci
-npm.cmd --prefix frontend run build
-& $py -m playwright install chromium
-```
-
-Успешные проверки:
-
-```powershell
-& $py -m pytest tests/test_unit.py --cov=shop.domain --cov-fail-under=80
-& $py -m pytest tests/test_integration.py
-& $py -m pytest tests/e2e -q --html=artifacts/e2e.html --self-contained-html
-```
-
-Браузер можно открыть вручную через `& $py -m shop` по адресу `http://127.0.0.1:5000`. Для E2E сервер запускается автоматически. Чтобы видеть действия теста, добавьте `--headed`.
-
-Для локального скриншота падения:
-
-```powershell
-$env:DEMO = 'e2e'
-& $py -m pytest tests/e2e -k test_search --html=artifacts/e2e-failed.html --self-contained-html --screenshot=only-on-failure --tracing=retain-on-failure --output=artifacts/playwright
-Remove-Item Env:DEMO
-& $py -m http.server 8001 --bind 127.0.0.1 --directory artifacts
-```
-
-Откройте в браузере http://127.0.0.1:8001/e2e.html для успешного прогона и http://127.0.0.1:8001/e2e-failed.html для демонстрации падения. Сервер отчётов останавливается сочетанием Ctrl+C.
-
-Локальное воспроизведение остальных блокировок:
-
-```powershell
-& $py -m pytest tests/fixtures/demo_unit_failure.py -q
-& $py -m pytest tests/test_unit.py -k test_total --cov=shop.domain --cov-fail-under=80
-& $py tools/security_gate.py --fixture tests/fixtures/bandit-high.json --report artifacts/bandit-demo.json
-```
-
-Создайте пустой репозиторий GitHub. Папка lab3 используется как корень репозитория, чтобы Actions находил .github/workflows/ci.yml. Перед первым коммитом замените OWNER/REPOSITORY в README. В PowerShell выполните, подставив адрес репозитория:
-
-```powershell
-git init -b main
-git add .
-git commit -m "Add shop UI tests and CI quality gates"
-git remote add origin https://github.com/OWNER/REPOSITORY.git
-git push -u origin main
-git switch -c ci-demo
-git push -u origin ci-demo
-```
-
-После успешного запуска в GitHub откройте **Settings → Branches → Add branch protection rule**. Укажите `main`, включите обязательный pull request, обязательные status checks и выберите `required-quality` после первого штатного прогона.
-
-Для скриншотов используйте **Actions → Shop CI → Run workflow** на отдельной ветке. Сохраните снимки успешного штатного прогона и демонстраций:
-
-| Значение `demo` | Что снять |
-|---|---|
-| `unit` | Красный job unit и серый job build со статусом skipped |
-| `coverage` | Лог с покрытием ниже 80 % и пропущенный build |
-| `security` | Лог с находкой HIGH и пропущенный build |
-| `e2e` | Падение браузерного теста и красный required-quality |
-
